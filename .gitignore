@@ -40,3 +40,9 @@ pnpm-debug.log*
 # Build artifacts
 build/
 coverage/
+
+.dockerignore
+
+docker-compose.yml
+
+Dockerfile
