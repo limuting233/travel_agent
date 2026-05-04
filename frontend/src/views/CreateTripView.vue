@@ -131,7 +131,7 @@ function submit() {
         preferences: form.preferences.length ? form.preferences.join(',') : null,
     })
 
-    router.push('/trip/planning')
+    router.replace('/trip/planning')
 }
 </script>
 

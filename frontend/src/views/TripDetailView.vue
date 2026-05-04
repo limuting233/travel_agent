@@ -51,7 +51,9 @@ async function fetchTripDetail() {
 }
 
 function leavePage() {
-  goBack(router)
+  goBack(router, '/trips', {
+    blockedBackPaths: ['/trip/create', '/trip/planning'],
+  })
 }
 
 function scrollToDay(day: number) {

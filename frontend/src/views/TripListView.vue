@@ -66,7 +66,9 @@ async function fetchTrips() {
 }
 
 function leavePage() {
-  navigateBack(router)
+  navigateBack(router, '/profile', {
+    blockedBackPaths: ['/trip/create', '/trip/planning'],
+  })
 }
 
 onMounted(() => {
