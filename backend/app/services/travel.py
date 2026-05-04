@@ -1,4 +1,3 @@
-import asyncio
 import json
 import uuid
 from datetime import date
@@ -23,7 +22,6 @@ from app.schemas.response.stream import (
     AgentStepEvent,
     DoneEvent,
     ErrorEvent,
-    MessageEvent,
     StartEvent,
     StreamResponse,
 )
@@ -239,14 +237,6 @@ class TravelService:
                             await self.db_session.commit()
 
                             logger.info(f"规划结果: {final_output}")
-                            for c in final_output:
-                                yield StreamResponse(
-                                    event="message",
-                                    data=MessageEvent(content=c),
-                                )
-
-                                await asyncio.sleep(0.05)
-
                             yield StreamResponse(
                                 event="done",
                                 data=DoneEvent(

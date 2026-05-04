@@ -70,7 +70,7 @@ class DailyTrip(BaseModel):
     每日行程模型
     """
     day: int = Field(description="第几天", examples=[1, 2, 3], ge=1)
-    date: str = Field(description="日期,格式为YYYY-MM-DD", examples=["2024-01-01"])
+    date: str | None = Field(default=None, description="日期，未指定旅行日期时为None，格式为YYYY-MM-DD", examples=["2024-01-01"])
     weather_label: str = Field(description="天气标签")
     schedule: list[ScheduleItemPlay | ScheduleItemCommute] = Field(
         description="行程计划，每个元素为一个活动，包含活动名称和时间窗口")

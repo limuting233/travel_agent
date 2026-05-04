@@ -244,11 +244,11 @@ def _pop_candidate(groups: dict, category: str, fallback: list[dict]) -> dict | 
     return fallback.pop(0) if fallback else None
 
 
-def _trip_date(start_date: str | None, day_index: int) -> str:
-    if start_date:
-        base = datetime.strptime(start_date, "%Y-%m-%d").date()
-    else:
-        base = date.today()
+def _trip_date(start_date: str | None, day_index: int) -> str | None:
+    if not start_date:
+        return None
+
+    base = datetime.strptime(start_date, "%Y-%m-%d").date()
     return (base + timedelta(days=day_index)).strftime("%Y-%m-%d")
 
 

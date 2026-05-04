@@ -123,6 +123,7 @@ PLANNER_AGENT_SYSTEM_PROMPT = """
    - `total_distance_km`: 所有交通节点的距离总和 / 1000。
 
 2. **DailyTrip**: 每日行程列表。包含 `schedule` 列表。
+   - `date`: 仅当用户指定了旅行开始日期时填写 `YYYY-MM-DD`；未指定具体日期时必须为 `null`。
 
 3. **Schedule (Poly-morphic List)**:
    列表中的元素必须交替出现：`Play` -> `Transport` -> `Play` ...
