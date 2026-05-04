@@ -11,8 +11,8 @@ class Settings(BaseSettings):
     配置类，用于存储应用程序的配置参数
     """
     # 项目配置
-    PROJECT_NAME: str = "Travel Agent Server"  # 项目名称
-    PROJECT_VERSION: str = "0.1.0"  # 项目版本号
+    PROJECT_NAME: str 
+    PROJECT_VERSION: str 
 
    
 
@@ -35,8 +35,8 @@ class Settings(BaseSettings):
     DB_NAME: str  # 数据库名称
     DB_POOL_SIZE: int  # 数据库连接池大小
     DB_MAX_OVERFLOW: int  # 数据库最大连接数溢出值
-    AUTH_SECRET: str = "travel-agent-dev-secret"
-    AUTH_TOKEN_EXPIRE_MINUTES: int = 24 * 60
+    AUTH_SECRET: str  # 认证密钥
+    AUTH_TOKEN_EXPIRE_MINUTES: int  # 认证令牌过期时间（分钟）默认60分钟    
 
     # 小红书 MCP 配置
     XHS_MCP_URL: str  # 小红书 MCP 接口 URL
