@@ -2,6 +2,14 @@
 
 移动端 H5 旅行规划应用。用户登录后填写目的地、天数、日期和旅行偏好，前端通过流式接口生成行程，并展示每日路线、通勤方式和外部导航入口。
 
+## 本地开发环境
+
+需要先准备：
+
+- Node.js `20.19+` 或 `22.12+`
+- npm
+- 已启动的后端服务：`http://127.0.0.1:8000`
+
 ## 技术栈
 
 - Vue 3
@@ -23,16 +31,23 @@
 npm install
 ```
 
-电脑本机预览：
+确认开发环境配置：
+
+```env
+VITE_API_BASE_URL=/api/v1
+VITE_BACKEND_TARGET=http://127.0.0.1:8000
+```
+
+启动开发服务：
 
 ```bash
-npm run dev
+npm run dev -- --port 5173
 ```
 
 手机访问同一局域网下的开发服务：
 
 ```bash
-npm run dev -- --host 0.0.0.0
+npm run dev -- --host 0.0.0.0 --port 5173
 ```
 
 启动后使用电脑的局域网 IP 访问，例如：
@@ -41,16 +56,9 @@ npm run dev -- --host 0.0.0.0
 http://192.168.x.x:5173
 ```
 
-## 接口模式
+## 接口联调
 
-开发环境默认连接后端真实接口。前端请求 `/api/v1`，由 Vite 代理到 FastAPI 服务，避免浏览器跨域问题。
-
-配置文件：[.env.development](.env.development)
-
-```env
-VITE_API_BASE_URL=/api/v1
-VITE_BACKEND_TARGET=http://127.0.0.1:8000
-```
+开发环境请求 `/api/v1`，由 Vite 代理到 `VITE_BACKEND_TARGET`。接口契约以根目录 [API.md](../API.md) 为准。
 
 ## 页面流程
 
@@ -88,7 +96,7 @@ VITE_BACKEND_TARGET=http://127.0.0.1:8000
 
 ## 接口文档
 
-接口契约以 [API.md](API.md) 为准。
+接口契约以根目录 [API.md](../API.md) 为准。
 
 前端接口封装：
 
@@ -117,18 +125,13 @@ src/
 
 ```bash
 npx vue-tsc --noEmit -p tsconfig.app.json --pretty false
+npx vue-tsc --noEmit -p tsconfig.node.json --pretty false
 ```
 
-构建：
+本地构建检查：
 
 ```bash
 npm run build
-```
-
-预览构建产物：
-
-```bash
-npm run preview
 ```
 
 ## 开发说明
