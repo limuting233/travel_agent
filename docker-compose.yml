@@ -23,7 +23,7 @@ services:
     env_file:
       - ${APP_ENV_FILE:-.env}
     environment:
-      ENV: prod
+      ENV: test
       DB_HOST: db
       DB_PORT: 5432
     depends_on:
