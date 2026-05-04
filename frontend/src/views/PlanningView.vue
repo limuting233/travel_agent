@@ -1,12 +1,10 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowLeft } from 'lucide-vue-next'
 import { motion } from 'motion-v'
 import { toast } from 'vue-sonner'
 import { createTravelPlan, type TravelPlanStreamMessage } from '@/api/travel'
 import { useTravelStore } from '@/stores/travel'
-import { goBack } from '@/utils/navigation'
 
 const router = useRouter()
 const travel = useTravelStore()
@@ -94,11 +92,6 @@ async function startPlanning() {
   }
 }
 
-function backToCreate() {
-  abortController?.abort()
-  goBack(router, '/trip/create')
-}
-
 onMounted(() => {
   void startPlanning()
 })
@@ -115,17 +108,8 @@ onBeforeUnmount(() => {
     :animate="{ opacity: 1, x: 0 }"
     :transition="{ duration: 0.28, ease: 'easeOut' }"
   >
-    <header class="fixed left-1/2 top-0 z-40 flex h-[calc(env(safe-area-inset-top)+56px)] w-full max-w-[430px] -translate-x-1/2 items-end justify-between bg-white/95 px-5 pb-3 backdrop-blur">
-      <button
-        class="flex size-9 items-center justify-center rounded-full bg-[#f2f2f2]"
-        type="button"
-        aria-label="返回上一页"
-        @click="backToCreate"
-      >
-        <ArrowLeft class="size-4" />
-      </button>
+    <header class="fixed left-1/2 top-0 z-40 flex h-[calc(env(safe-area-inset-top)+56px)] w-full max-w-[430px] -translate-x-1/2 items-end justify-center bg-white/95 px-5 pb-3 backdrop-blur">
       <p class="pb-2 text-sm font-semibold">规划行程</p>
-      <span class="size-9"></span>
     </header>
 
     <section class="flex flex-1 flex-col items-center justify-center text-center">
