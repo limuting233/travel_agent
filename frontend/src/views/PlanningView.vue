@@ -12,7 +12,6 @@ const isPlanning = ref(false)
 const statusText = ref('正在规划中')
 const tripId = ref('')
 const errorMessage = ref('')
-const streamContent = ref('')
 
 let abortController: AbortController | null = null
 
@@ -32,11 +31,6 @@ function handlePlanEvent(message: TravelPlanStreamMessage) {
 
   if ((message.event === 'agent_step' || message.event === 'tool_call') && 'message' in data && typeof data.message === 'string') {
     statusText.value = data.message
-    return
-  }
-
-  if (message.event === 'message' && 'content' in data && typeof data.content === 'string') {
-    streamContent.value += data.content
     return
   }
 
@@ -65,7 +59,6 @@ async function startPlanning() {
   isPlanning.value = true
   errorMessage.value = ''
   statusText.value = '正在规划中'
-  streamContent.value = ''
   tripId.value = ''
   abortController = new AbortController()
 

@@ -27,7 +27,7 @@ export interface TripScheduleItem {
 
 export interface DailyItinerary {
   day: number
-  date?: string
+  date?: string | null
   weather_label?: string
   schedule: TripScheduleItem[]
 }
