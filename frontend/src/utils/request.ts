@@ -1,5 +1,4 @@
 import axios, { type AxiosRequestConfig } from 'axios'
-import { isMockApiEnabled, mockHttpRequest, mockStreamRequest } from '@/mocks/api'
 
 const DEFAULT_BASE_URL = '/api/v1'
 const ACCESS_TOKEN_KEY = 'travel_agent_access_token'
@@ -92,7 +91,7 @@ function createApiError(error: unknown) {
   const responseData = error.response?.data
 
   if (isApiResponse(responseData)) {
-    if (responseData.code === 401) clearAccessToken()
+    if (status === 401) clearAccessToken()
 
     return new ApiError(responseData.error_message || responseData.message || '请求失败', {
       code: responseData.code,
@@ -149,32 +148,22 @@ requestClient.interceptors.response.use(
 
 export const http = {
   get<T = unknown>(url: string, config?: AxiosRequestConfig) {
-    if (isMockApiEnabled()) return mockHttpRequest<T>('GET', url, undefined)
-
     return requestClient.get<ApiResponse<T>, T>(url, config)
   },
 
   post<T = unknown, TBody = unknown>(url: string, data?: TBody, config?: AxiosRequestConfig) {
-    if (isMockApiEnabled()) return mockHttpRequest<T>('POST', url, data)
-
     return requestClient.post<ApiResponse<T>, T>(url, data, config)
   },
 
   put<T = unknown, TBody = unknown>(url: string, data?: TBody, config?: AxiosRequestConfig) {
-    if (isMockApiEnabled()) return mockHttpRequest<T>('PUT', url, data)
-
     return requestClient.put<ApiResponse<T>, T>(url, data, config)
   },
 
   patch<T = unknown, TBody = unknown>(url: string, data?: TBody, config?: AxiosRequestConfig) {
-    if (isMockApiEnabled()) return mockHttpRequest<T>('PATCH', url, data)
-
     return requestClient.patch<ApiResponse<T>, T>(url, data, config)
   },
 
   delete<T = unknown>(url: string, config?: AxiosRequestConfig) {
-    if (isMockApiEnabled()) return mockHttpRequest<T>('DELETE', url, undefined)
-
     return requestClient.delete<ApiResponse<T>, T>(url, config)
   },
 }
@@ -233,7 +222,7 @@ async function parseErrorResponse(response: Response) {
     const data = JSON.parse(text) as unknown
 
     if (isApiResponse(data)) {
-      if (data.code === 401) clearAccessToken()
+      if (response.status === 401) clearAccessToken()
 
       return new ApiError(data.error_message || data.message || '请求失败', {
         code: data.code,
@@ -254,10 +243,6 @@ async function parseErrorResponse(response: Response) {
 export async function streamRequest<TData = unknown, TBody = unknown>(
   config: StreamRequestConfig<TBody, TData>,
 ) {
-  if (isMockApiEnabled()) {
-    return mockStreamRequest<TData, TBody>(config)
-  }
-
   const token = getAccessToken()
   const headers: Record<string, string> = {
     Accept: 'text/event-stream',

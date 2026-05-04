@@ -41,37 +41,16 @@ npm run dev -- --host 0.0.0.0
 http://192.168.x.x:5173
 ```
 
-## Mock 模式
+## 接口模式
 
-当前后端接口还未完全跑通，开发环境默认使用 mock。
+开发环境默认连接后端真实接口。前端请求 `/api/v1`，由 Vite 代理到 FastAPI 服务，避免浏览器跨域问题。
 
 配置文件：[.env.development](.env.development)
 
 ```env
 VITE_API_BASE_URL=/api/v1
-VITE_USE_MOCK=true
+VITE_BACKEND_TARGET=http://127.0.0.1:8000
 ```
-
-关闭 mock：
-
-```env
-VITE_USE_MOCK=false
-```
-
-mock 实现位置：
-
-```text
-src/mocks/api.ts
-```
-
-已模拟接口：
-
-- `POST /api/v1/auth/register`
-- `POST /api/v1/auth/login`
-- `GET /api/v1/auth/me`
-- `POST /api/v1/travel/plan`
-- `GET /api/v1/trips`
-- `GET /api/v1/trips/{trip_id}`
 
 ## 页面流程
 
@@ -126,7 +105,6 @@ src/utils/request.ts
 src/
   api/              接口封装
   components/ui/    shadcn-vue 风格组件
-  mocks/            前端 mock 接口
   router/           路由和登录守卫
   stores/           Pinia 状态
   utils/            request、导航等工具
@@ -159,5 +137,5 @@ npm run preview
 - Toast 使用 `vue-sonner`。
 - 图标使用 `lucide-vue-next`。
 - 登录 token 存在 `localStorage`。
-- 待生成的行程参数和 mock 行程存在 `sessionStorage`。
-- 行程规划接口使用 SSE 流式响应；mock 中会模拟 `start`、`agent_step`、`tool_call`、`message`、`done` 事件。
+- 待生成的行程参数存在 `sessionStorage`。
+- 行程规划接口使用 SSE 流式响应，前端处理 `start`、`agent_step`、`tool_call`、`message`、`done`、`error` 事件。
