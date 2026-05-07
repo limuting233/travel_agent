@@ -161,7 +161,7 @@ function submit() {
                         id="destination"
                         v-model="form.destination"
                         class="mt-3 h-14 w-full rounded-lg border border-[#dddddd] bg-white px-3 text-base outline-none transition focus:border-[#222222]"
-                        placeholder="例如：上海、东京、云南"
+                        placeholder="例如：上海、北京、云南"
                         type="text"
                         @input="clearDestinationError" />
                     <p v-if="fieldErrors.destination" class="mt-2 text-xs font-medium text-[#c13515]">
