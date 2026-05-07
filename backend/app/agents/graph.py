@@ -1,8 +1,10 @@
+import asyncio
 import json
 import math
+import re
 from datetime import date, datetime, timedelta
 
-from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.runtime import Runtime
 
@@ -12,6 +14,7 @@ from app.agents.manager_agent.agent import ManagerAgentBuilder, ManagerAgentOutp
 # from app.agents.mcp import create_mcp_client
 from app.agents.memory import init_checkpointer
 from app.agents.message import ManagerAgentMessage, EnvironmentAgentMessage, ResourceAgentMessage, PlannerAgentMessage
+from app.agents.resource_agent.agent import ResourceAgentBuilder, SearchPlanOutput, SearchPlanTask
 from app.agents.resource_agent.tools.poi import calculate_poi_count, search_poi
 from app.agents.state import TravelAgentState
 
@@ -28,8 +31,325 @@ RESOURCE_CATEGORY_MAP = {
     "住宿": "ACCOMMODATION",
 }
 
-RESOURCE_SEARCH_LIMIT = 6
 PLANNER_ROUTE_MCP_CALL_LIMIT = 6
+BLOCKED_CHAIN_FOOD_KEYWORDS = (
+    "肯德基",
+    "kfc",
+    "麦当劳",
+    "mcdonald",
+    "必胜客",
+    "pizza hut",
+    "达美乐",
+    "domino",
+    "汉堡王",
+    "burger king",
+    "星巴克",
+    "starbucks",
+    "瑞幸",
+    "luckin",
+    "喜茶",
+    "奈雪",
+    "一点点",
+    "coco",
+    "蜜雪冰城",
+    "华莱士",
+    "德克士",
+    "dicos",
+    "赛百味",
+    "subway",
+    "棒约翰",
+    "papa john",
+)
+LOCAL_FOOD_RULES = {
+    "北京": {
+        "search_keywords": ("北京烤鸭", "北京小吃", "京味老字号"),
+        "include_keywords": (
+            "北京菜",
+            "京菜",
+            "京味",
+            "老北京",
+            "烤鸭",
+            "涮肉",
+            "铜锅",
+            "炸酱面",
+            "豆汁",
+            "焦圈",
+            "卤煮",
+            "炒肝",
+            "爆肚",
+            "驴打滚",
+            "豌豆黄",
+            "灌肠",
+            "糖火烧",
+            "羊蝎子",
+            "门钉肉饼",
+            "褡裢火烧",
+            "小吊梨汤",
+            "护国寺",
+            "牛街",
+            "门框胡同",
+            "全聚德",
+            "便宜坊",
+            "四季民福",
+            "大董",
+            "聚宝源",
+            "南门涮肉",
+            "稻香村",
+            "庆丰",
+            "姚记",
+            "天兴居",
+            "都一处",
+            "锦芳",
+            "北平",
+        ),
+    },
+    "上海": {
+        "search_keywords": ("上海本帮菜", "上海小吃", "上海老字号"),
+        "include_keywords": (
+            "本帮",
+            "上海菜",
+            "沪菜",
+            "生煎",
+            "小笼",
+            "小笼包",
+            "蟹粉",
+            "排骨年糕",
+            "葱油拌面",
+            "红烧肉",
+            "熏鱼",
+            "鲜肉月饼",
+            "老上海",
+            "南翔",
+            "德兴馆",
+            "老饭店",
+            "绿波廊",
+        ),
+    },
+    "杭州": {
+        "search_keywords": ("杭州杭帮菜", "杭州小吃", "杭州老字号"),
+        "include_keywords": (
+            "杭帮",
+            "杭州菜",
+            "西湖醋鱼",
+            "龙井虾仁",
+            "东坡肉",
+            "片儿川",
+            "定胜糕",
+            "葱包桧",
+            "知味观",
+            "楼外楼",
+            "奎元馆",
+        ),
+    },
+    "南京": {
+        "search_keywords": ("南京鸭血粉丝", "南京小吃", "南京老字号"),
+        "include_keywords": (
+            "南京菜",
+            "金陵",
+            "鸭血粉丝",
+            "盐水鸭",
+            "板鸭",
+            "鸭油烧饼",
+            "汤包",
+            "牛肉锅贴",
+            "梅花糕",
+            "秦淮",
+            "夫子庙",
+        ),
+    },
+    "苏州": {
+        "search_keywords": ("苏州苏帮菜", "苏州小吃", "苏州老字号"),
+        "include_keywords": (
+            "苏帮",
+            "苏州菜",
+            "松鼠桂鱼",
+            "响油鳝糊",
+            "苏式面",
+            "奥灶面",
+            "蟹粉",
+            "生煎",
+            "哑巴生煎",
+            "得月楼",
+            "松鹤楼",
+        ),
+    },
+    "成都": {
+        "search_keywords": ("成都川菜", "成都小吃", "成都老字号"),
+        "include_keywords": (
+            "川菜",
+            "成都小吃",
+            "火锅",
+            "串串",
+            "钵钵鸡",
+            "担担面",
+            "钟水饺",
+            "龙抄手",
+            "夫妻肺片",
+            "冒菜",
+            "兔头",
+            "肥肠粉",
+        ),
+    },
+    "重庆": {
+        "search_keywords": ("重庆火锅", "重庆小面", "重庆江湖菜"),
+        "include_keywords": (
+            "重庆火锅",
+            "重庆小面",
+            "江湖菜",
+            "毛血旺",
+            "辣子鸡",
+            "酸辣粉",
+            "抄手",
+            "豆花",
+            "山城",
+        ),
+    },
+    "西安": {
+        "search_keywords": ("西安肉夹馍", "西安小吃", "西安老字号"),
+        "include_keywords": (
+            "肉夹馍",
+            "羊肉泡馍",
+            "泡馍",
+            "凉皮",
+            "biangbiang",
+            "臊子面",
+            "葫芦鸡",
+            "甑糕",
+            "胡辣汤",
+            "回民街",
+            "陕菜",
+        ),
+    },
+    "广州": {
+        "search_keywords": ("广州早茶", "广州粤菜", "广州老字号"),
+        "include_keywords": (
+            "粤菜",
+            "广府",
+            "早茶",
+            "点心",
+            "肠粉",
+            "烧鹅",
+            "叉烧",
+            "云吞面",
+            "艇仔粥",
+            "煲仔饭",
+            "陶陶居",
+            "广州酒家",
+            "莲香楼",
+            "泮溪",
+        ),
+    },
+    "深圳": {
+        "search_keywords": ("深圳粤菜", "深圳早茶", "深圳本地美食"),
+        "include_keywords": (
+            "粤菜",
+            "早茶",
+            "点心",
+            "肠粉",
+            "烧鹅",
+            "叉烧",
+            "潮汕",
+            "客家",
+            "海鲜",
+            "光明乳鸽",
+        ),
+    },
+    "厦门": {
+        "search_keywords": ("厦门沙茶面", "厦门小吃", "厦门闽南菜"),
+        "include_keywords": (
+            "闽南",
+            "沙茶面",
+            "海蛎煎",
+            "土笋冻",
+            "姜母鸭",
+            "花生汤",
+            "烧肉粽",
+            "面线糊",
+            "同安",
+        ),
+    },
+    "武汉": {
+        "search_keywords": ("武汉热干面", "武汉小吃", "武汉湖北菜"),
+        "include_keywords": (
+            "热干面",
+            "豆皮",
+            "鸭脖",
+            "武昌鱼",
+            "藕汤",
+            "糊汤粉",
+            "烧麦",
+            "过早",
+            "湖北菜",
+            "楚菜",
+        ),
+    },
+    "长沙": {
+        "search_keywords": ("长沙湘菜", "长沙小吃", "长沙老字号"),
+        "include_keywords": (
+            "湘菜",
+            "臭豆腐",
+            "糖油粑粑",
+            "口味虾",
+            "剁椒鱼头",
+            "米粉",
+            "小炒黄牛肉",
+            "长沙菜",
+        ),
+    },
+    "天津": {
+        "search_keywords": ("天津小吃", "天津老字号", "天津本地美食"),
+        "include_keywords": (
+            "天津菜",
+            "津菜",
+            "狗不理",
+            "煎饼果子",
+            "麻花",
+            "耳朵眼",
+            "锅巴菜",
+            "嘎巴菜",
+            "熟梨糕",
+        ),
+    },
+    "青岛": {
+        "search_keywords": ("青岛海鲜", "青岛本地菜", "青岛小吃"),
+        "include_keywords": (
+            "海鲜",
+            "鲁菜",
+            "青岛菜",
+            "啤酒",
+            "鲅鱼",
+            "蛤蜊",
+            "锅贴",
+            "脂渣",
+        ),
+    },
+    "哈尔滨": {
+        "search_keywords": ("哈尔滨东北菜", "哈尔滨俄餐", "哈尔滨小吃"),
+        "include_keywords": (
+            "东北菜",
+            "俄餐",
+            "锅包肉",
+            "红肠",
+            "大列巴",
+            "杀猪菜",
+            "铁锅炖",
+            "马迭尔",
+        ),
+    },
+    "昆明": {
+        "search_keywords": ("昆明云南菜", "昆明过桥米线", "昆明小吃"),
+        "include_keywords": (
+            "云南菜",
+            "滇菜",
+            "过桥米线",
+            "汽锅鸡",
+            "鲜花饼",
+            "菌子",
+            "野生菌",
+            "饵块",
+        ),
+    },
+}
 
 
 def _to_float(value) -> float | None:
@@ -49,32 +369,84 @@ def _suggested_duration(category: str) -> float:
     return 2.0
 
 
-def _build_candidate(raw_poi: dict, amap_category: str, preferences: list[str] | None) -> dict | None:
-    rating = _to_float(raw_poi.get("评分（0-5分）"))
-    category = RESOURCE_CATEGORY_MAP[amap_category]
+def _is_blocked_chain_food(name: str) -> bool:
+    normalized_name = str(name).strip().lower()
+    return any(keyword in normalized_name for keyword in BLOCKED_CHAIN_FOOD_KEYWORDS)
 
-    if rating is not None and rating < 3.8 and category != "ACCOMMODATION":
+
+def _normalize_food_brand_name(name: str) -> str:
+    normalized_name = str(name).strip().lower()
+    normalized_name = re.sub(r"[（(][^）)]*[）)]", "", normalized_name)
+    normalized_name = re.sub(r"[-_·|｜/／].*$", "", normalized_name)
+    normalized_name = re.sub(r"(?:旗舰店|总店|分店|门店|餐厅)$", "", normalized_name)
+    normalized_name = re.sub(r"\s+", "", normalized_name)
+    return normalized_name
+
+
+def _food_brand_key(candidate: dict) -> str | None:
+    if candidate.get("category") != "LOCAL_GASTRONOMY":
+        return None
+
+    brand_name = _normalize_food_brand_name(str(candidate.get("name") or ""))
+    return brand_name or None
+
+
+def _local_food_rule(location: str) -> dict | None:
+    return next((rule for city, rule in LOCAL_FOOD_RULES.items() if city in location), None)
+
+
+def _is_destination_local_food(raw_poi: dict, location: str) -> bool:
+    rule = _local_food_rule(location)
+    if not rule:
+        return True
+
+    tags = raw_poi.get("tags", "")
+    if isinstance(tags, list):
+        tags = "".join(str(tag) for tag in tags)
+
+    searchable_text = "".join(
+        str(raw_poi.get(key, ""))
+        for key in ("名称", "分类", "标签", "地址", "name", "category", "source_category")
+    )
+    searchable_text += str(tags)
+    return any(keyword in searchable_text for keyword in rule["include_keywords"])
+
+
+def _build_resource_candidate_from_raw_poi(raw_poi: dict, amap_category: str) -> dict | None:
+    category = RESOURCE_CATEGORY_MAP.get(amap_category)
+    if category is None:
+        return None
+
+    name = str(raw_poi.get("名称") or "").strip()
+    poi_id = str(raw_poi.get("id") or "").strip()
+    location = str(raw_poi.get("经纬度（经度,纬度）") or "").strip()
+    if not name or not poi_id or not location:
         return None
 
     tags = []
     raw_tags = raw_poi.get("标签")
     if raw_tags:
-        tags.extend([tag.strip() for tag in str(raw_tags).split(";") if tag.strip()])
-    if preferences:
-        tags.extend(preferences)
+        tags.extend(tag.strip() for tag in str(raw_tags).split(";") if tag.strip())
+    raw_category = str(raw_poi.get("分类") or "").strip()
+    if raw_category:
+        tags.append(raw_category)
 
-    name = raw_poi.get("名称", "")
+    rating = _to_float(raw_poi.get("评分（0-5分）"))
     reason_parts = []
     if rating is not None:
         reason_parts.append(f"高德评分{rating:g}")
-    reason_parts.append("与用户偏好和行程类型匹配")
+    if category == "LOCAL_GASTRONOMY":
+        reason_parts.append("按目的地本地美食搜索计划召回")
+    else:
+        reason_parts.append("按目的地POI搜索计划召回")
 
     return {
-        "id": raw_poi.get("id", ""),
+        "id": poi_id,
         "name": name,
         "category": category,
-        "tags": list(dict.fromkeys(tags)) or [amap_category],
-        "location": raw_poi.get("经纬度（经度,纬度）", ""),
+        "tags": tags or [amap_category],
+        "source_category": raw_category,
+        "location": location,
         "rating": rating,
         "price": _to_float(raw_poi.get("人均消费（元/人）")),
         "open_time": raw_poi.get("营业时间（每周）", "") or "",
@@ -84,46 +456,110 @@ def _build_candidate(raw_poi: dict, amap_category: str, preferences: list[str] |
     }
 
 
-async def _collect_resource_candidates(
-    location: str,
-    days: int,
-    preferences: list[str] | None,
-) -> list[dict]:
-    target_count = await calculate_poi_count(days)
-    preference_text = " ".join(preferences or [])
-    food_keyword = preference_text if preference_text else "本地美食"
+def _normalize_resource_candidate(candidate: dict, location: str) -> dict | None:
+    category = candidate.get("category")
+    if category not in {
+        "CORE_SIGHTSEEING",
+        "LOCAL_GASTRONOMY",
+        "CITY_LEISURE",
+        "ACCOMMODATION",
+    }:
+        return None
 
-    search_plan = [
-        ("风景名胜", "景点", max(days * 2, 2)),
-        ("科教文", "博物馆", max(days, 1)),
-        ("美食", food_keyword, max(days * 2, 2)),
-        ("购物", "商圈", max(days, 1)),
-        ("住宿", "酒店", 1),
-        ("娱乐", "夜景", max(days, 1)),
-    ]
+    name = str(candidate.get("name") or "").strip()
+    poi_id = str(candidate.get("id") or "").strip()
+    poi_location = str(candidate.get("location") or "").strip()
+    if not name or not poi_id or not poi_location:
+        return None
 
-    candidates = []
+    rating = _to_float(candidate.get("rating"))
+    if rating is not None and rating < 3.8 and category != "ACCOMMODATION":
+        return None
+    if category == "LOCAL_GASTRONOMY" and _is_blocked_chain_food(name):
+        return None
+    if category == "LOCAL_GASTRONOMY" and not _is_destination_local_food(candidate, location):
+        return None
+
+    tags = candidate.get("tags") or []
+    if not isinstance(tags, list):
+        tags = [str(tags)]
+
+    return {
+        "id": poi_id,
+        "name": name,
+        "category": category,
+        "tags": list(dict.fromkeys(str(tag).strip() for tag in tags if str(tag).strip())) or [category],
+        "location": poi_location,
+        "rating": rating,
+        "price": _to_float(candidate.get("price")),
+        "open_time": str(candidate.get("open_time") or ""),
+        "suggested_duration": _to_float(candidate.get("suggested_duration")) or _suggested_duration(category),
+        "photo": str(candidate.get("photo") or ""),
+        "recommend_reason": str(candidate.get("recommend_reason") or "根据地点质量、位置和用户偏好推荐。"),
+    }
+
+
+def _sanitize_resource_candidates(candidates: list[dict], location: str) -> list[dict]:
+    sanitized = []
     seen_ids = set()
-    for amap_category, keyword, category_limit in search_plan[:RESOURCE_SEARCH_LIMIT]:
-        category_count = 0
-        pois = await search_poi(city=location, keywords=keyword, category=amap_category)
-        for raw_poi in pois:
-            poi_id = raw_poi.get("id")
-            if not poi_id or poi_id in seen_ids:
-                continue
-            candidate = _build_candidate(raw_poi, amap_category, preferences)
-            if candidate is None:
-                continue
-            seen_ids.add(poi_id)
-            candidates.append(candidate)
-            category_count += 1
-            if category_count >= category_limit:
-                break
-        if len(candidates) >= target_count:
-            break
+    seen_food_brands = set()
 
-    logger.info(f"resource_agent确定性搜索完成，POI数量: {len(candidates)}, 目标数量: {target_count}")
-    return candidates[:target_count]
+    for raw_candidate in candidates:
+        candidate = _normalize_resource_candidate(raw_candidate, location)
+        if candidate is None:
+            continue
+
+        poi_id = candidate["id"]
+        if poi_id in seen_ids:
+            continue
+
+        food_brand_key = _food_brand_key(candidate)
+        if food_brand_key and food_brand_key in seen_food_brands:
+            continue
+
+        seen_ids.add(poi_id)
+        if food_brand_key:
+            seen_food_brands.add(food_brand_key)
+        sanitized.append(candidate)
+
+    return sanitized
+
+
+def _parse_search_plan_output(resp: dict) -> SearchPlanOutput:
+    search_plan = resp.get("structured_response")
+    if search_plan is None:
+        return SearchPlanOutput.model_validate_json(resp["messages"][-1].content)
+    if isinstance(search_plan, SearchPlanOutput):
+        return search_plan
+    return SearchPlanOutput.model_validate(search_plan)
+
+
+async def _execute_search_plan_task(location: str, task: SearchPlanTask) -> list[dict]:
+    pois = await search_poi(city=location, keywords=task.keyword, category=task.category)
+    candidates = []
+    retain_limit = task.limit * 3
+    for raw_poi in pois:
+        candidate = _build_resource_candidate_from_raw_poi(raw_poi, task.category)
+        if candidate is None:
+            continue
+        candidates.append(candidate)
+        if len(candidates) >= retain_limit:
+            break
+    return candidates
+
+
+async def _execute_search_plan(location: str, search_plan: SearchPlanOutput) -> list[dict]:
+    task_results = await asyncio.gather(
+        *[
+            _execute_search_plan_task(location=location, task=task)
+            for task in search_plan.tasks
+        ]
+    )
+    return [
+        candidate
+        for candidates in task_results
+        for candidate in candidates
+    ]
 
 
 def _parse_location(location: str) -> tuple[float, float] | None:
@@ -238,10 +674,53 @@ def _build_play_item(seq: int, time_window: str, poi: dict, action: str) -> dict
     }
 
 
-def _pop_candidate(groups: dict, category: str, fallback: list[dict]) -> dict | None:
-    if groups.get(category):
-        return groups[category].pop(0)
-    return fallback.pop(0) if fallback else None
+def _candidate_key(candidate: dict) -> str:
+    poi_id = str(candidate.get("id") or "").strip()
+    if poi_id:
+        return f"id:{poi_id}"
+
+    name = str(candidate.get("name") or "").strip()
+    location = str(candidate.get("location") or "").strip()
+    return f"name_location:{name}:{location}"
+
+
+def _pop_unused_candidate(
+    groups: dict,
+    category: str,
+    fallback: list[dict],
+    used_candidate_keys: set[str],
+    used_food_brand_keys: set[str],
+) -> dict | None:
+    category_candidates = groups.get(category) or []
+    while category_candidates:
+        candidate = category_candidates.pop(0)
+        candidate_key = _candidate_key(candidate)
+        food_brand_key = _food_brand_key(candidate)
+        if candidate_key and candidate_key in used_candidate_keys:
+            continue
+        if food_brand_key and food_brand_key in used_food_brand_keys:
+            continue
+        if candidate_key:
+            used_candidate_keys.add(candidate_key)
+        if food_brand_key:
+            used_food_brand_keys.add(food_brand_key)
+        return candidate
+
+    while fallback:
+        candidate = fallback.pop(0)
+        candidate_key = _candidate_key(candidate)
+        food_brand_key = _food_brand_key(candidate)
+        if candidate_key and candidate_key in used_candidate_keys:
+            continue
+        if food_brand_key and food_brand_key in used_food_brand_keys:
+            continue
+        if candidate_key:
+            used_candidate_keys.add(candidate_key)
+        if food_brand_key:
+            used_food_brand_keys.add(food_brand_key)
+        return candidate
+
+    return None
 
 
 def _trip_date(start_date: str | None, day_index: int) -> str | None:
@@ -265,22 +744,33 @@ async def _build_deterministic_plan(context: TravelAgentContext, candidates: lis
         groups.setdefault(candidate.get("category"), []).append(candidate)
 
     fallback = [candidate for candidate in candidates]
+    used_candidate_keys = set()
+    used_food_brand_keys = set()
     days = context["days"]
     daily_itinerary = []
     total_distance_meter = 0.0
 
     for day_index in range(days):
-        morning = _pop_candidate(groups, "CORE_SIGHTSEEING", fallback)
-        lunch = _pop_candidate(groups, "LOCAL_GASTRONOMY", fallback)
-        afternoon = _pop_candidate(groups, "CITY_LEISURE", fallback) or _pop_candidate(groups, "CORE_SIGHTSEEING", fallback)
-        dinner = _pop_candidate(groups, "LOCAL_GASTRONOMY", fallback)
-        hotel = groups["ACCOMMODATION"][0] if groups["ACCOMMODATION"] else None
-        day_pois = [poi for poi in [morning, lunch, afternoon, dinner, hotel] if poi]
+        morning = _pop_unused_candidate(
+            groups, "CORE_SIGHTSEEING", fallback, used_candidate_keys, used_food_brand_keys
+        )
+        lunch = _pop_unused_candidate(
+            groups, "LOCAL_GASTRONOMY", fallback, used_candidate_keys, used_food_brand_keys
+        )
+        afternoon = _pop_unused_candidate(
+            groups, "CITY_LEISURE", fallback, used_candidate_keys, used_food_brand_keys
+        ) or _pop_unused_candidate(
+            groups, "CORE_SIGHTSEEING", fallback, used_candidate_keys, used_food_brand_keys
+        )
+        dinner = _pop_unused_candidate(
+            groups, "LOCAL_GASTRONOMY", fallback, used_candidate_keys, used_food_brand_keys
+        )
+        day_pois = [poi for poi in [morning, lunch, afternoon, dinner] if poi]
 
         schedule = []
-        play_windows = ["09:00-11:00", "11:30-12:40", "14:00-16:00", "18:00-19:30", "20:00-21:00"]
-        commute_windows = ["11:00-11:30", "12:40-14:00", "16:00-18:00", "19:30-20:00"]
-        actions = ["浏览", "午餐", "浏览", "晚餐", "住宿"]
+        play_windows = ["09:00-11:00", "11:30-12:40", "14:00-16:00", "18:00-19:30"]
+        commute_windows = ["11:00-11:30", "12:40-14:00", "16:00-18:00"]
+        actions = ["浏览", "午餐", "浏览", "晚餐"]
 
         seq = 1
         for index, poi in enumerate(day_pois):
@@ -509,17 +999,58 @@ async def resource_agent_node(state: TravelAgentState, runtime: Runtime[TravelAg
     preferences = context.get("preferences", None)
     is_need_correct = state["is_need_correct"]
     if not is_need_correct:
-        candidates = await _collect_resource_candidates(
-            location=location,
-            days=days,
-            preferences=preferences,
+        agent = await ResourceAgentBuilder().build()
+        target_count = await calculate_poi_count(days)
+        msg = (
+            f"请为{location}{days}天旅行生成POI搜索计划。"
+            f"用户偏好：{preferences or '无'}。"
+            f"目标数量：至少{target_count}个。"
+            "计划需要覆盖核心景点、本地美食、城市休闲和住宿。"
+            "美食搜索关键词必须体现目的地本地特色，不要用外地菜系代表目的地。"
         )
+        resp = await agent.ainvoke(
+            input={
+                "messages": [SystemMessage(content=msg)]
+            },
+            config={"recursion_limit": 8},
+        )
+        search_plan = _parse_search_plan_output(resp)
+        raw_candidates = await _execute_search_plan(location=location, search_plan=search_plan)
+        candidates = _sanitize_resource_candidates(
+            candidates=raw_candidates,
+            location=location,
+        )
+
+        if len(candidates) < target_count:
+            retry_msg = (
+                f"上一次搜索结果经过后端硬规则过滤后只剩{len(candidates)}个，"
+                f"未达到目标数量{target_count}。请继续搜索{location}POI补充候选，"
+                "重点补足缺失的景点、本地美食、城市休闲和住宿类型。"
+                "只输出补充搜索计划，不要重复已给出的地点或同品牌美食分店。"
+            )
+            retry_resp = await agent.ainvoke(
+                input={
+                    "messages": [
+                        SystemMessage(content=msg),
+                        HumanMessage(
+                            content=f"{retry_msg}\n\n已有候选：{json.dumps(candidates, ensure_ascii=False)}"
+                        ),
+                    ]
+                },
+                config={"recursion_limit": 8},
+            )
+            retry_plan = _parse_search_plan_output(retry_resp)
+            raw_candidates.extend(await _execute_search_plan(location=location, search_plan=retry_plan))
+            candidates = _sanitize_resource_candidates(
+                candidates=raw_candidates,
+                location=location,
+            )
 
         return {
             "current_phase": "resource_agent",
             "next_phase": "manager_agent",
             "messages": [
-                SystemMessage(content="resource_agent已完成确定性POI搜索"),
+                SystemMessage(content="resource_agent已生成搜索计划，后端并发搜索POI并完成硬规则过滤"),
                 ResourceAgentMessage(content=json.dumps(candidates, ensure_ascii=False)),
             ]
         }
