@@ -412,7 +412,43 @@ def _is_destination_local_food(raw_poi: dict, location: str) -> bool:
     return any(keyword in searchable_text for keyword in rule["include_keywords"])
 
 
-def _build_resource_candidate_from_raw_poi(raw_poi: dict, amap_category: str) -> dict | None:
+def _build_recommend_reason(
+    name: str,
+    category: str,
+    rating: float | None,
+    tags: list[str],
+    raw_category: str,
+    search_keyword: str,
+    search_reason: str,
+) -> str:
+    quality_text = f"高德评分{rating:g}" if rating is not None else "高德信息完整"
+    tag_text = "、".join(tags[:2]) if tags else raw_category
+
+    if category == "LOCAL_GASTRONOMY":
+        if search_reason:
+            return f"{name}契合“{search_keyword}”这条本地美食线索，{quality_text}，适合作为当天餐食亮点。"
+        return f"{name}带有{tag_text or '本地餐饮'}特色，{quality_text}，比普通连锁餐饮更适合放进行程。"
+
+    if category == "CORE_SIGHTSEEING":
+        if "博物" in raw_category or "展览" in raw_category or "科教" in raw_category:
+            return f"{name}偏文化和室内参观，{quality_text}，适合用来丰富行程的历史与城市背景。"
+        return f"{name}是这条“{search_keyword}”搜索线里的重点地点，{quality_text}，适合作为当天核心游览点。"
+
+    if category == "CITY_LEISURE":
+        return f"{name}更适合安排在下午或傍晚串联动线，{quality_text}，可以补足逛街、夜景或城市休闲体验。"
+
+    if category == "ACCOMMODATION":
+        return f"{name}作为住宿候选，位置和基础信息适合后续串联每日路线，{quality_text}。"
+
+    return f"{name}与“{search_keyword}”匹配，{quality_text}，可作为行程候选。"
+
+
+def _build_resource_candidate_from_raw_poi(
+    raw_poi: dict,
+    amap_category: str,
+    search_keyword: str,
+    search_reason: str,
+) -> dict | None:
     category = RESOURCE_CATEGORY_MAP.get(amap_category)
     if category is None:
         return None
@@ -432,13 +468,15 @@ def _build_resource_candidate_from_raw_poi(raw_poi: dict, amap_category: str) ->
         tags.append(raw_category)
 
     rating = _to_float(raw_poi.get("评分（0-5分）"))
-    reason_parts = []
-    if rating is not None:
-        reason_parts.append(f"高德评分{rating:g}")
-    if category == "LOCAL_GASTRONOMY":
-        reason_parts.append("按目的地本地美食搜索计划召回")
-    else:
-        reason_parts.append("按目的地POI搜索计划召回")
+    recommend_reason = _build_recommend_reason(
+        name=name,
+        category=category,
+        rating=rating,
+        tags=tags,
+        raw_category=raw_category,
+        search_keyword=search_keyword,
+        search_reason=search_reason,
+    )
 
     return {
         "id": poi_id,
@@ -452,7 +490,7 @@ def _build_resource_candidate_from_raw_poi(raw_poi: dict, amap_category: str) ->
         "open_time": raw_poi.get("营业时间（每周）", "") or "",
         "suggested_duration": _suggested_duration(category),
         "photo": raw_poi.get("照片URL") or "",
-        "recommend_reason": "，".join(reason_parts) + "。",
+        "recommend_reason": recommend_reason,
     }
 
 
@@ -525,6 +563,54 @@ def _sanitize_resource_candidates(candidates: list[dict], location: str) -> list
     return sanitized
 
 
+async def _validate_resource_candidates(
+    candidates: list[dict],
+    context: TravelAgentContext,
+) -> tuple[bool, list[str]]:
+    issues = []
+    days = context["days"]
+    target_count = await calculate_poi_count(days)
+    categories = {candidate.get("category") for candidate in candidates}
+
+    if len(candidates) < target_count:
+        issues.append(f"POI数量不足：需要至少{target_count}个，当前{len(candidates)}个")
+    if "CORE_SIGHTSEEING" not in categories:
+        issues.append("缺少核心景点候选")
+    if "LOCAL_GASTRONOMY" not in categories:
+        issues.append("缺少本地美食候选")
+    if days > 1 and "ACCOMMODATION" not in categories:
+        issues.append("多天行程缺少住宿候选")
+
+    seen_candidate_keys = set()
+    seen_food_brand_keys = set()
+    for candidate in candidates:
+        name = str(candidate.get("name") or "").strip()
+        poi_id = str(candidate.get("id") or "").strip()
+        location = str(candidate.get("location") or "").strip()
+        category = candidate.get("category")
+        if not name or not poi_id or not location:
+            issues.append(f"POI字段不完整：{name or poi_id or '未知地点'}")
+
+        candidate_key = _candidate_key(candidate)
+        if candidate_key in seen_candidate_keys:
+            issues.append(f"POI重复：{name}")
+        seen_candidate_keys.add(candidate_key)
+
+        food_brand_key = _food_brand_key(candidate)
+        if food_brand_key:
+            if food_brand_key in seen_food_brand_keys:
+                issues.append(f"同品牌美食重复：{name}")
+            seen_food_brand_keys.add(food_brand_key)
+
+        if category == "LOCAL_GASTRONOMY":
+            if _is_blocked_chain_food(name):
+                issues.append(f"包含连锁快餐：{name}")
+            if not _is_destination_local_food(candidate, context["location"]):
+                issues.append(f"美食不符合目的地本地特色：{name}")
+
+    return not issues, issues
+
+
 def _parse_search_plan_output(resp: dict) -> SearchPlanOutput:
     search_plan = resp.get("structured_response")
     if search_plan is None:
@@ -539,7 +625,12 @@ async def _execute_search_plan_task(location: str, task: SearchPlanTask) -> list
     candidates = []
     retain_limit = task.limit * 3
     for raw_poi in pois:
-        candidate = _build_resource_candidate_from_raw_poi(raw_poi, task.category)
+        candidate = _build_resource_candidate_from_raw_poi(
+            raw_poi=raw_poi,
+            amap_category=task.category,
+            search_keyword=task.keyword,
+            search_reason=task.reason,
+        )
         if candidate is None:
             continue
         candidates.append(candidate)
@@ -616,7 +707,7 @@ async def _build_commute_item(
     from_poi: dict,
     to_poi: dict,
     route_tools: dict,
-    route_call_state: dict,
+    use_route_tool: bool,
 ) -> dict:
     from_location = from_poi.get("location", "")
     to_location = to_poi.get("location", "")
@@ -625,8 +716,7 @@ async def _build_commute_item(
     distance_meter = estimated_distance
     commute_time_min = max(5, round(estimated_distance / (5000 / 60)))
 
-    if route_call_state["count"] < PLANNER_ROUTE_MCP_CALL_LIMIT and "maps_distance" in route_tools:
-        route_call_state["count"] += 1
+    if use_route_tool and "maps_distance" in route_tools:
         distance_type = "3" if transport_mode == "walking" else "1"
         try:
             result = await route_tools["maps_distance"].ainvoke(
@@ -690,37 +780,162 @@ def _pop_unused_candidate(
     fallback: list[dict],
     used_candidate_keys: set[str],
     used_food_brand_keys: set[str],
+    anchor_location: str | None = None,
 ) -> dict | None:
-    category_candidates = groups.get(category) or []
-    while category_candidates:
-        candidate = category_candidates.pop(0)
-        candidate_key = _candidate_key(candidate)
-        food_brand_key = _food_brand_key(candidate)
-        if candidate_key and candidate_key in used_candidate_keys:
-            continue
-        if food_brand_key and food_brand_key in used_food_brand_keys:
-            continue
+    def pop_from(candidates: list[dict]) -> dict | None:
+        valid_candidates = []
+        for index, candidate in enumerate(candidates):
+            candidate_key = _candidate_key(candidate)
+            food_brand_key = _food_brand_key(candidate)
+            if candidate_key and candidate_key in used_candidate_keys:
+                continue
+            if food_brand_key and food_brand_key in used_food_brand_keys:
+                continue
+            valid_candidates.append((index, candidate))
+
+        if not valid_candidates:
+            return None
+
+        if anchor_location:
+            selected_index, selected_candidate = min(
+                valid_candidates,
+                key=lambda item: _haversine_meter(anchor_location, item[1].get("location", "")),
+            )
+        else:
+            selected_index, selected_candidate = valid_candidates[0]
+
+        candidates.pop(selected_index)
+        candidate_key = _candidate_key(selected_candidate)
+        food_brand_key = _food_brand_key(selected_candidate)
         if candidate_key:
             used_candidate_keys.add(candidate_key)
         if food_brand_key:
             used_food_brand_keys.add(food_brand_key)
+        return selected_candidate
+
+    candidate = pop_from(groups.get(category) or [])
+    if candidate:
         return candidate
 
-    while fallback:
-        candidate = fallback.pop(0)
-        candidate_key = _candidate_key(candidate)
-        food_brand_key = _food_brand_key(candidate)
-        if candidate_key and candidate_key in used_candidate_keys:
-            continue
-        if food_brand_key and food_brand_key in used_food_brand_keys:
-            continue
-        if candidate_key:
-            used_candidate_keys.add(candidate_key)
-        if food_brand_key:
-            used_food_brand_keys.add(food_brand_key)
-        return candidate
+    return pop_from(fallback)
 
-    return None
+
+async def _build_commute_items_for_day(
+    day_pois: list[dict],
+    commute_windows: list[str],
+    route_tools: dict,
+    route_calls_used: int,
+) -> tuple[list[dict], int, float]:
+    commute_tasks = []
+    for index in range(len(day_pois) - 1):
+        use_route_tool = route_calls_used < PLANNER_ROUTE_MCP_CALL_LIMIT
+        if use_route_tool:
+            route_calls_used += 1
+        commute_tasks.append(
+            _build_commute_item(
+                seq=index * 2 + 2,
+                time_window=commute_windows[index],
+                from_poi=day_pois[index],
+                to_poi=day_pois[index + 1],
+                route_tools=route_tools,
+                use_route_tool=use_route_tool,
+            )
+        )
+
+    commute_items = await asyncio.gather(*commute_tasks) if commute_tasks else []
+    total_distance_meter = sum(commute["distance_meter"] for commute in commute_items)
+    return commute_items, route_calls_used, total_distance_meter
+
+
+def _build_day_schedule(
+    day_pois: list[dict],
+    commute_items: list[dict],
+    play_windows: list[str],
+    actions: list[str],
+) -> list[dict]:
+    schedule = []
+    seq = 1
+    for index, poi in enumerate(day_pois):
+        schedule.append(_build_play_item(seq, play_windows[index], poi, actions[index]))
+        seq += 1
+        if index < len(commute_items):
+            commute = dict(commute_items[index])
+            commute["seq"] = seq
+            schedule.append(commute)
+            seq += 1
+    return schedule
+
+
+def _validate_planner_output(plan: dict, context: TravelAgentContext) -> tuple[bool, list[str]]:
+    issues = []
+    days = context["days"]
+    daily_itinerary = plan.get("daily_itinerary") or []
+    if len(daily_itinerary) != days:
+        issues.append(f"每日行程数量不匹配：需要{days}天，当前{len(daily_itinerary)}天")
+
+    seen_poi_keys = set()
+    seen_food_brand_keys = set()
+    for day in daily_itinerary:
+        day_number = day.get("day")
+        schedule = day.get("schedule") or []
+        play_items = [
+            item
+            for item in schedule
+            if item.get("action") != "通勤"
+        ]
+        commute_items = [
+            item
+            for item in schedule
+            if item.get("action") == "通勤"
+        ]
+
+        if not play_items:
+            issues.append(f"第{day_number}天没有活动安排")
+        if not any(item.get("category") == "CORE_SIGHTSEEING" for item in play_items):
+            issues.append(f"第{day_number}天缺少核心景点")
+        if not any(item.get("action") == "午餐" for item in play_items):
+            issues.append(f"第{day_number}天缺少午餐")
+        if not any(item.get("action") == "晚餐" for item in play_items):
+            issues.append(f"第{day_number}天缺少晚餐")
+
+        day_distance_meter = sum(
+            float(item.get("distance_meter") or 0)
+            for item in commute_items
+        )
+        if day_distance_meter > 50000:
+            issues.append(f"第{day_number}天通勤距离过长：{day_distance_meter / 1000:.1f}km")
+
+        for item in play_items:
+            poi_name = str(item.get("poi_name") or "").strip()
+            poi_id = str(item.get("poi_id") or "").strip()
+            location = str(item.get("location") or "").strip()
+            if not poi_name or not poi_id or not location:
+                issues.append(f"第{day_number}天活动字段不完整：{poi_name or poi_id or '未知地点'}")
+
+            poi_key = poi_id or f"{poi_name}:{location}"
+            if poi_key in seen_poi_keys:
+                issues.append(f"行程中POI重复：{poi_name}")
+            seen_poi_keys.add(poi_key)
+
+            if item.get("category") == "LOCAL_GASTRONOMY":
+                candidate = {
+                    "category": "LOCAL_GASTRONOMY",
+                    "name": poi_name,
+                    "tags": [],
+                    "location": location,
+                    "recommend_reason": item.get("reason", ""),
+                }
+                food_brand_key = _food_brand_key(candidate)
+                if food_brand_key:
+                    if food_brand_key in seen_food_brand_keys:
+                        issues.append(f"行程中同品牌美食重复：{poi_name}")
+                    seen_food_brand_keys.add(food_brand_key)
+                if _is_blocked_chain_food(poi_name):
+                    issues.append(f"行程包含连锁快餐：{poi_name}")
+                if not _is_destination_local_food(candidate, context["location"]):
+                    issues.append(f"行程美食不符合目的地本地特色：{poi_name}")
+
+    return not issues, issues
 
 
 def _trip_date(start_date: str | None, day_index: int) -> str | None:
@@ -733,7 +948,7 @@ def _trip_date(start_date: str | None, day_index: int) -> str | None:
 
 async def _build_deterministic_plan(context: TravelAgentContext, candidates: list[dict]) -> dict:
     route_tools = await _load_amap_route_tools()
-    route_call_state = {"count": 0}
+    route_calls_used = 0
     groups = {
         "CORE_SIGHTSEEING": [],
         "LOCAL_GASTRONOMY": [],
@@ -755,39 +970,55 @@ async def _build_deterministic_plan(context: TravelAgentContext, candidates: lis
             groups, "CORE_SIGHTSEEING", fallback, used_candidate_keys, used_food_brand_keys
         )
         lunch = _pop_unused_candidate(
-            groups, "LOCAL_GASTRONOMY", fallback, used_candidate_keys, used_food_brand_keys
+            groups,
+            "LOCAL_GASTRONOMY",
+            fallback,
+            used_candidate_keys,
+            used_food_brand_keys,
+            anchor_location=morning.get("location") if morning else None,
         )
         afternoon = _pop_unused_candidate(
-            groups, "CITY_LEISURE", fallback, used_candidate_keys, used_food_brand_keys
+            groups,
+            "CITY_LEISURE",
+            fallback,
+            used_candidate_keys,
+            used_food_brand_keys,
+            anchor_location=lunch.get("location") if lunch else None,
         ) or _pop_unused_candidate(
-            groups, "CORE_SIGHTSEEING", fallback, used_candidate_keys, used_food_brand_keys
+            groups,
+            "CORE_SIGHTSEEING",
+            fallback,
+            used_candidate_keys,
+            used_food_brand_keys,
+            anchor_location=lunch.get("location") if lunch else None,
         )
         dinner = _pop_unused_candidate(
-            groups, "LOCAL_GASTRONOMY", fallback, used_candidate_keys, used_food_brand_keys
+            groups,
+            "LOCAL_GASTRONOMY",
+            fallback,
+            used_candidate_keys,
+            used_food_brand_keys,
+            anchor_location=afternoon.get("location") if afternoon else None,
         )
         day_pois = [poi for poi in [morning, lunch, afternoon, dinner] if poi]
 
-        schedule = []
         play_windows = ["09:00-11:00", "11:30-12:40", "14:00-16:00", "18:00-19:30"]
         commute_windows = ["11:00-11:30", "12:40-14:00", "16:00-18:00"]
         actions = ["浏览", "午餐", "浏览", "晚餐"]
 
-        seq = 1
-        for index, poi in enumerate(day_pois):
-            schedule.append(_build_play_item(seq, play_windows[index], poi, actions[index]))
-            seq += 1
-            if index < len(day_pois) - 1:
-                commute = await _build_commute_item(
-                    seq=seq,
-                    time_window=commute_windows[index],
-                    from_poi=poi,
-                    to_poi=day_pois[index + 1],
-                    route_tools=route_tools,
-                    route_call_state=route_call_state,
-                )
-                total_distance_meter += commute["distance_meter"]
-                schedule.append(commute)
-                seq += 1
+        commute_items, route_calls_used, day_distance_meter = await _build_commute_items_for_day(
+            day_pois=day_pois,
+            commute_windows=commute_windows,
+            route_tools=route_tools,
+            route_calls_used=route_calls_used,
+        )
+        total_distance_meter += day_distance_meter
+        schedule = _build_day_schedule(
+            day_pois=day_pois,
+            commute_items=commute_items,
+            play_windows=play_windows,
+            actions=actions,
+        )
 
         daily_itinerary.append(
             {
@@ -870,7 +1101,45 @@ async def manager_agent_node(state: TravelAgentState, runtime: Runtime[TravelAge
 
     if last_phase == "resource_agent":
         candidates = json.loads(state["messages"][-1].content)  # 解析resource agent返回的poi列表
-        # todo 对poi列表进行质检
+        is_valid, issues = await _validate_resource_candidates(candidates, context)
+        if not is_valid:
+            reason = "；".join(issues)
+            resource_attempt_count = sum(
+                1
+                for msg in state["messages"]
+                if isinstance(msg, ResourceAgentMessage)
+            )
+            if resource_attempt_count >= 2:
+                logger.warning(f"resource agent返回的POI列表质检仍不通过，已达到补搜上限: {reason}")
+                return {
+                    "current_phase": "manager_agent",
+                    "next_phase": "planner_agent",
+                    "is_need_correct": False,
+                    "need_correct_content": None,
+                    "messages": [
+                        SystemMessage(content=f"resource agent返回的POI列表质检仍不通过，已达到补搜上限: {reason}"),
+                        ManagerAgentMessage(
+                            content=ManagerAgentOutput(
+                                next_to="planner_agent",
+                                reason=f"POI质检仍有问题但已达到补搜上限，继续生成可用行程：{reason}",
+                            ).model_dump_json()
+                        )
+                    ]
+                }
+
+            return {
+                "current_phase": "manager_agent",
+                "next_phase": "resource_agent",
+                "is_need_correct": True,
+                "need_correct_content": reason,
+                "messages": [
+                    SystemMessage(content="resource agent返回的POI列表质检不通过"),
+                    ManagerAgentMessage(
+                        content=ManagerAgentOutput(next_to="resource_agent", reason=reason).model_dump_json()
+                    )
+                ]
+            }
+
         return {
             "current_phase": "manager_agent",
             "next_phase": "planner_agent",
@@ -885,7 +1154,25 @@ async def manager_agent_node(state: TravelAgentState, runtime: Runtime[TravelAge
 
     if last_phase == "planner_agent":
         planner_output = state["messages"][-1].content
-        # todo 对最终规划结果进行质检
+        planner_plan = json.loads(planner_output)
+        is_valid, issues = _validate_planner_output(planner_plan, context)
+        if not is_valid:
+            reason = "；".join(issues)
+            logger.warning(f"planner agent返回的最终规划结果质检不通过: {reason}")
+            return {
+                "current_phase": "manager_agent",
+                "next_phase": "finish",
+                "is_need_correct": False,
+                "need_correct_content": None,
+                "messages": [
+                    SystemMessage(content=f"planner agent返回的最终规划结果质检不通过: {reason}"),
+                    ManagerAgentMessage(
+                        content=ManagerAgentOutput(next_to="finish", reason=f"质检不通过但已生成可用行程：{reason}").model_dump_json()
+                    ),
+                    ManagerAgentMessage(content=planner_output)
+                ]
+            }
+
         return {
             "current_phase": "manager_agent",
             "next_phase": "finish",
@@ -997,64 +1284,67 @@ async def resource_agent_node(state: TravelAgentState, runtime: Runtime[TravelAg
     location = context["location"]
     days = context["days"]
     preferences = context.get("preferences", None)
-    is_need_correct = state["is_need_correct"]
-    if not is_need_correct:
-        agent = await ResourceAgentBuilder().build()
-        target_count = await calculate_poi_count(days)
-        msg = (
-            f"请为{location}{days}天旅行生成POI搜索计划。"
-            f"用户偏好：{preferences or '无'}。"
-            f"目标数量：至少{target_count}个。"
-            "计划需要覆盖核心景点、本地美食、城市休闲和住宿。"
-            "美食搜索关键词必须体现目的地本地特色，不要用外地菜系代表目的地。"
+    correction_reason = state.get("need_correct_content") if state["is_need_correct"] else None
+    agent = await ResourceAgentBuilder().build()
+    target_count = await calculate_poi_count(days)
+    msg = (
+        f"请为{location}{days}天旅行生成POI搜索计划。"
+        f"用户偏好：{preferences or '无'}。"
+        f"目标数量：至少{target_count}个。"
+        "计划需要覆盖核心景点、本地美食、城市休闲和住宿。"
+        "美食搜索关键词必须体现目的地本地特色，不要用外地菜系代表目的地。"
+    )
+    if correction_reason:
+        msg += f"上一次POI质检失败原因：{correction_reason}。请针对这些问题重新生成搜索计划。"
+
+    resp = await agent.ainvoke(
+        input={
+            "messages": [SystemMessage(content=msg)]
+        },
+        config={"recursion_limit": 8},
+    )
+    search_plan = _parse_search_plan_output(resp)
+    raw_candidates = await _execute_search_plan(location=location, search_plan=search_plan)
+    candidates = _sanitize_resource_candidates(
+        candidates=raw_candidates,
+        location=location,
+    )
+
+    if len(candidates) < target_count:
+        retry_msg = (
+            f"上一次搜索结果经过后端硬规则过滤后只剩{len(candidates)}个，"
+            f"未达到目标数量{target_count}。请继续搜索{location}POI补充候选，"
+            "重点补足缺失的景点、本地美食、城市休闲和住宿类型。"
+            "只输出补充搜索计划，不要重复已给出的地点或同品牌美食分店。"
         )
-        resp = await agent.ainvoke(
+        retry_resp = await agent.ainvoke(
             input={
-                "messages": [SystemMessage(content=msg)]
+                "messages": [
+                    SystemMessage(content=msg),
+                    HumanMessage(
+                        content=f"{retry_msg}\n\n已有候选：{json.dumps(candidates, ensure_ascii=False)}"
+                    ),
+                ]
             },
             config={"recursion_limit": 8},
         )
-        search_plan = _parse_search_plan_output(resp)
-        raw_candidates = await _execute_search_plan(location=location, search_plan=search_plan)
+        retry_plan = _parse_search_plan_output(retry_resp)
+        raw_candidates.extend(await _execute_search_plan(location=location, search_plan=retry_plan))
         candidates = _sanitize_resource_candidates(
             candidates=raw_candidates,
             location=location,
         )
 
-        if len(candidates) < target_count:
-            retry_msg = (
-                f"上一次搜索结果经过后端硬规则过滤后只剩{len(candidates)}个，"
-                f"未达到目标数量{target_count}。请继续搜索{location}POI补充候选，"
-                "重点补足缺失的景点、本地美食、城市休闲和住宿类型。"
-                "只输出补充搜索计划，不要重复已给出的地点或同品牌美食分店。"
-            )
-            retry_resp = await agent.ainvoke(
-                input={
-                    "messages": [
-                        SystemMessage(content=msg),
-                        HumanMessage(
-                            content=f"{retry_msg}\n\n已有候选：{json.dumps(candidates, ensure_ascii=False)}"
-                        ),
-                    ]
-                },
-                config={"recursion_limit": 8},
-            )
-            retry_plan = _parse_search_plan_output(retry_resp)
-            raw_candidates.extend(await _execute_search_plan(location=location, search_plan=retry_plan))
-            candidates = _sanitize_resource_candidates(
-                candidates=raw_candidates,
-                location=location,
-            )
-
-        return {
-            "current_phase": "resource_agent",
-            "next_phase": "manager_agent",
-            "messages": [
-                SystemMessage(content="resource_agent已生成搜索计划，后端并发搜索POI并完成硬规则过滤"),
-                ResourceAgentMessage(content=json.dumps(candidates, ensure_ascii=False)),
-            ]
-        }
-    # todo 对poi列表进行质检不通过，需要重新查询poi
+    return {
+        "current_phase": "resource_agent",
+        "next_phase": "manager_agent",
+        "is_need_correct": False,
+        "need_correct_content": None,
+        "messages": [
+            SystemMessage(content="resource_agent已生成搜索计划，后端并发搜索POI并完成硬规则过滤"),
+            ResourceAgentMessage(content=json.dumps(candidates, ensure_ascii=False)),
+        ]
+    }
 
 
 async def planner_agent_node(state: TravelAgentState, runtime: Runtime[TravelAgentContext]):
@@ -1067,24 +1357,24 @@ async def planner_agent_node(state: TravelAgentState, runtime: Runtime[TravelAge
     logger.info("进入planner_agent_node")
     context = runtime.context
 
-    if not state["is_need_correct"]:
-        candidates = []
-        for msg in reversed(state["messages"]):
-            if isinstance(msg, ResourceAgentMessage):
-                candidates = json.loads(msg.content)
-                break
+    candidates = []
+    for msg in reversed(state["messages"]):
+        if isinstance(msg, ResourceAgentMessage):
+            candidates = json.loads(msg.content)
+            break
 
-        plan = await _build_deterministic_plan(context, candidates)
-        res = json.dumps(plan, ensure_ascii=False)
-        return {
-            "current_phase": "planner_agent",
-            "next_phase": "manager_agent",
-            "messages": [
-                SystemMessage(content="planner_agent已完成确定性行程生成，并使用高德路线MCP计算通勤"),
-                PlannerAgentMessage(content=res),
-            ]
-        }
-    # todo 对planner_agent的输出进行质检不通过，需要重新规划
+    plan = await _build_deterministic_plan(context, candidates)
+    res = json.dumps(plan, ensure_ascii=False)
+    return {
+        "current_phase": "planner_agent",
+        "next_phase": "manager_agent",
+        "is_need_correct": False,
+        "need_correct_content": None,
+        "messages": [
+            SystemMessage(content="planner_agent已完成确定性行程生成，并使用高德路线MCP计算通勤"),
+            PlannerAgentMessage(content=res),
+        ]
+    }
 
 
 async def build_travel_agent():
